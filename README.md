@@ -26,7 +26,7 @@
 ```
 qqbot_python/
 ├── MyClient.py          # botpy 客户端入口，注册消息事件（appid/secret 从 config 读取）
-├── Main.py              # 备用入口
+├── Main.py              # 入口
 ├── config.py            # 全局配置：模型、窗口、卡片、阈值等，每项带注释；敏感值走 os.getenv
 ├── requirements.txt     # 依赖清单
 ├── .env.example         # 环境变量模板（提交，重命名为 .env 后填入真实值）
