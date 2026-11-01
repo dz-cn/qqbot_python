@@ -1,0 +1,15 @@
+# QQ 官方机器人凭据
+qq-botpy==1.2.1
+
+# LangChain 1.0 智能体栈（recat_agent 使用 create_agent，底层依赖 langgraph）
+langchain==1.4.7
+langchain-core==1.7.3
+langgraph==1.2.19
+
+# 模型接入：DeepSeek 等 OpenAI 兼容服务 + 本地 Ollama
+langchain-openai==1.7.3
+langchain-ollama==1.1.0
+openai==3.42.0
+
+# 从 .env 加载环境变量/密钥
+python-dotenv>=1.0.0
