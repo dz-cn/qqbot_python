@@ -26,7 +26,7 @@ def queryRag(question: str):
     从混合检索
     :param question: 要查询的问题
     """
-    return retrieve(question, "openid", "scope")
+    return retrieve(question, ["openid"])
 
 
 if __name__ == "__main__":

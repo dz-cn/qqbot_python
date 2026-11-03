@@ -78,7 +78,7 @@ def save_vectors(chunks: list[tuple[str, str]], parent_id: str, openid: str, sco
                          embeddings=_embeddings().embed_documents(texts),
                          metadatas=[{META_OPENID: openid, META_TYPE: scope, META_PARENT: parent_id}
                                     for _ in chunks])
-    logger.info(f"[rag.vector] 灌向量 parent_id={parent_id} 子块={len(ids)}")
+    logger.info(f"[rag.vector] 向量存储 parent_id={parent_id} 子块={len(ids)}")
     return len(ids)
 
 
