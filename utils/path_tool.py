@@ -19,8 +19,3 @@ def get_abs_path(relative_path: str | Path) -> Path:
     :return: 绝对路径
     """
     return get_project_root_path() / relative_path
-
-
-if __name__ == '__main__':
-    print(get_project_root_path())
-    print(get_abs_path("config/config.txt"))

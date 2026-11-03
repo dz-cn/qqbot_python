@@ -1,9 +1,12 @@
-"""记忆卡片的存储与读取，以及上下文压缩的业务层。
-SQL 都在 db_ops 里，这里只做「参数清洗 + 编排」。"""
-import config
+"""chat_summary 的业务层：编排参数、组装 SQL（取自 db.summary_db_sql）、执行读写。
+SQL 语句本身不写在这里，只调用 db_sql.sql_* 拿到语句，再交给 BaseOps 的 query/write。"""
+from service.base_service import write, query
 from botpy import logger
-from session import db_ops
-from model.factory import deepseek_summary_model
+from model.factory import summary_model
+from service.message_service import pending_compress
+import db as db_sql
+import config
+import utils
 
 _SUMMARY_PROMPT = f"""你在维护一段长期对话的滚动摘要。
 【已有摘要】（可能为空）
@@ -18,37 +21,29 @@ _SUMMARY_PROMPT = f"""你在维护一段长期对话的滚动摘要。
 3. 已有摘要里仍然有效的信息要保留；不要编造对话中没提到的内容。
 只输出摘要正文，不要前言后语。"""
 
-# -------------------------------------------- 记忆卡片的储存
-def _clamp_score(value: int, lo: int = config.CARD_SCORE_MIN, hi: int = config.CARD_SCORE_MAX,
-                 default: int = config.CARD_SCORE_DEFAULT) -> int:
-    """把模型传来的分数强制夹到 1~5，非法值退回默认，避免脏数据入库。"""
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(lo, min(hi, n))
+
+def latest_summary(scope: str, openid: str) -> dict | None:
+    """取版本最大的一条摘要（即最新水位线快照）；没有则返回 None。"""
+    sql = db_sql.sql_latest_summary()
+    rows = query(sql, (scope, openid))
+    return rows[0] if rows else None
+
+def next_version(scope: str, openid: str) -> int:
+    """当前最大版本 +1，作为新摘要的版本号；空表时为 1。"""
+    sql = db_sql.sql_next_version()
+    return (query(sql, (scope, openid))[0]["v"] or 0) + 1
+
+def save_summary(scope: str, openid: str, version: int, summary: str,
+                 final_msg_id: int) -> bool:
+    """写入摘要即等于推进水位线；返回 False 表示该版本已被别的请求写过（唯一冲突），应放弃本次压缩。
+    摘要为空时禁止写入——水位线一旦前进，那段消息就再也取不回来了。
+    """
+    sql = db_sql.sql_save_summary()
+    _, rowcount = write(sql, (scope, openid, version, summary.strip(),
+                                   final_msg_id, utils.now()))
+    return bool(rowcount)
 
 
-def insert_card(scope: str, openid: str, title: str, content: str, *,
-                importance: int = config.CARD_IMPORTANCE_DEFAULT, clarity: int = config.CARD_CLARITY_DEFAULT,
-                source_msg_id: int) -> bool:
-    title = (title or "").strip()
-    content = (content or "").strip()
-    if not title or not content:
-        logger.warning(f"[insert_card] 放弃写入空卡片 scope={scope} openid={openid} title={title!r}")
-        return False
-    imp = _clamp_score(importance)
-    cla = _clamp_score(clarity)
-    db_ops.upsert_card(scope, openid, title, content,
-                       importance=imp,
-                       clarity=cla,
-                       source_msg_id=source_msg_id)
-    logger.info(f"[insert_card] 卡片已保存 scope={scope} openid={openid} "
-                f"title={title!r} importance={imp} clarity={cla} content={content[:40]!r}")
-    return True
-
-
-# -------------------------------------------- 上下问的压缩
 def compress_context(scope: str, openid: str, *,
                      batch: int = config.COMPRESS_BATCH,
                      keep_recent: int = config.COMPRESS_KEEP_RECENT) -> bool:
@@ -58,19 +53,19 @@ def compress_context(scope: str, openid: str, *,
     """
 
     # 去除最新的一条压缩内容 + 已经压缩的最后一个语句的 id
-    latest = db_ops.latest_summary(scope, openid)
+    latest = latest_summary(scope, openid)
     after_id = latest["final_msg_id"] if latest else 0
     old_summary = latest["summary"] if latest else ""
 
     # 获取要压缩的内容
-    pending = db_ops.pending_compress(scope, openid, after_id, batch=batch, keep_recent=keep_recent)
+    pending = pending_compress(scope, openid, after_id, batch=batch, keep_recent=keep_recent)
     if not pending:
         logger.info(f"[compress] 未达阈值，跳过压缩 scope={scope} openid={openid} 水位线={after_id}")
         return False
     logger.info(f"[compress] 触发压缩 scope={scope} openid={openid} 水位线={after_id} 本批={len(pending)}条")
 
     dialog = "\n".join(f"{m['role']}: {m['content']}" for m in pending)
-    new_summary = deepseek_summary_model.invoke(
+    new_summary = summary_model.invoke(
         _SUMMARY_PROMPT.format(old=old_summary or "（无）", new=dialog)
     ).content.strip()
 
@@ -79,8 +74,8 @@ def compress_context(scope: str, openid: str, *,
         logger.warning(f"[compress] 模型返回空摘要，放弃本次压缩 scope={scope} openid={openid}")
         return False
 
-    version = db_ops.next_version(scope, openid)
-    saved = db_ops.save_summary(scope, openid, version, new_summary, pending[-1]["id"])
+    version = next_version(scope, openid)
+    saved = save_summary(scope, openid, version, new_summary, pending[-1]["id"])
     if saved:
         logger.info(f"[compress] 摘要写入成功 scope={scope} openid={openid} "
                     f"version={version} 新水位线={pending[-1]['id']} 摘要长度={len(new_summary)}")

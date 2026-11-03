@@ -1,57 +1,103 @@
 # qqbot_python
 
-基于 **QQ 官方机器人 (botpy) + LangChain 1.0** 的智能陪聊机器人，核心特性是**分层记忆架构**与**上下文滚动压缩**。
+基于 **QQ 官方机器人 (botpy) + LangChain 1.0** 的智能陪聊机器人。核心能力是三件事：**分层记忆**（原始 / 摘要 / 事实卡片）、**混合检索知识库**（FTS5 字面腿 + Chroma 语义腿 + RRF 融合）、**模型自主工具调用**（记忆沉淀、知识检索、历史回查、时间获取）。
 
 ## 功能特性
 
-- 🤖 接入 QQ 官方开放平台，收发私聊 (C2C) 与群聊消息
+- 🤖 接入 QQ 开放平台，支持私聊 (C2C)、群聊全量消息与 @机器人消息
 - 🧠 三层记忆：原始消息层 / 滚动摘要层 / 事实卡片层
-- 🗜️ 上下文压缩：未压缩消息超阈值时，把最老的一批滚动并入摘要并推进水位线
-- 🃏 记忆卡片：模型自主判断是否调用工具沉淀长期事实，支持 **全局 / 局部** 两种作用域
-- 🎭 场景化提示词：群聊、私聊使用不同的角色提示词
-- 🧵 异步压缩：摘要生成放入后台线程池，不阻塞回复主链路
-- 🔐 密钥隔离：API Key / Bot 凭据通过 `.env` + 环境变量管理，不进入代码与 git
+- 🗜️ 上下文滚动压缩：未压缩消息超阈值时，把最老一批并入摘要并推进水位线，后台线程执行不阻塞回复
+- 🃏 记忆卡片由模型自主写入，三轴打分（重要性 / 清晰度 / 半衰期），支持**全局桶 + 会话桶**两种作用域
+- ⏳ 记忆衰减：按半衰期档位对陈旧卡片降权，超过 `CARD_MAX_HALF_LIVES` 个半衰期不再加载
+- 📚 知识库混合检索：五步语义切块（小切大返）→ 字面腿 + 语义腿并集 RRF → 父段归并 → 预算装填
+- 🔒 权限在 SQL 里裁决：检索结果的可见性由 `rag_parent.openid/type` 单点决定，不在 Python 里二次筛
+- 🛠️ 四个模型可调用工具：`memory_card` / `knowledge_search` / `search_chat_messages` / `get_current_time`
+- 🎭 场景化提示词：群聊与私聊使用不同角色提示词
+- 🔐 密钥隔离：API Key 与 Bot 凭据走 `.env` + `os.getenv`，不进入代码与 git
 
 ## 技术栈
 
-- Python 3.13
-- [qq-botpy](https://pypi.org/project/qq-botpy/) — QQ 官方机器人 SDK（导入名是 `botpy`，安装名是 `qq-botpy`）
-- LangChain 1.0 + LangGraph — 智能体与工具调用（`create_agent`）
-- 模型：DeepSeek 等 OpenAI 兼容服务（`ChatOpenAI`）/ 本地 Ollama（`ChatOllama`）
-- SQLite — 记忆持久化（WAL 模式，一次性连接）
-- python-dotenv — 加载 `.env`
+| 用途 | 选型 |
+|---|---|
+| 语言 | Python 3.13 |
+| QQ 机器人 | [qq-botpy](https://pypi.org/project/qq-botpy/) 1.2.1（导入名 `botpy`，安装名 `qq-botpy`） |
+| 智能体 | LangChain 1.x `create_agent` + LangGraph 1.x（工具调用、中间件钩子） |
+| 对话 / 摘要模型 | 本地 Ollama（`ChatOllama`，默认 `qwen3:8b`），或 DeepSeek 等 OpenAI 兼容服务（`ChatOpenAI`） |
+| 嵌入模型 | Ollama `OllamaEmbeddings`（默认 `qwen3-embedding:latest`） |
+| 关系存储 | SQLite（WAL 模式 + 外键 + 一次性连接） |
+| 关键词检索 | SQLite **FTS5**，`trigram` 分词（中文免分词库，需 SQLite ≥ 3.34） |
+| 向量检索 | **ChromaDB** 持久化集合（cosine 距离） |
+| 配置 | python-dotenv + `config.py` 集中管理 |
+
 
 ## 目录结构
 
 ```
 qqbot_python/
-├── MyClient.py          # botpy 客户端入口，注册消息事件（appid/secret 从 config 读取）
-├── Main.py              # 入口
-├── config.py            # 全局配置：模型、窗口、卡片、阈值等，每项带注释；敏感值走 os.getenv
-├── requirements.txt     # 依赖清单
-├── .env.example         # 环境变量模板（提交，重命名为 .env 后填入真实值）
-├── agent/
-│   ├── recat_agent.py   # 主流程：装配上下文 → 调模型 → 存消息 → 后台压缩
+├── Main.py                    # 入口：建表 → 注册 intents → 启动 botpy 客户端
+├── MyClient.py                # 事件处理：群聊/私聊消息 → agent.chat() → 回复
+├── config.py                  # 全部可调参数，每项带一行「含义 + 影响」注释
+├── requirements.txt           # 依赖清单
+├── .env.example               # 环境变量模板（复制为 .env 后填真实值）
+│
+├── agent/                     # 编排层：一次请求从头到尾怎么走
+│   ├── recat_agent.py         #   装配上下文 → 预检索 → 调模型 → 存消息 → 后台压缩
 │   └── tools/
-│       ├── agent_tools.py    # memory_card 工具（模型侧写卡片，支持 is_global）
-│       ├── message_build.py  # 把卡片/摘要/原文拼成模型输入
-│       └── middleware.py     # agent 中间件钩子
+│       ├── agent_tools.py     #   四个 @tool：description 即「模型侧的业务逻辑」
+│       ├── message_build.py   #   数据 → 模型可读文字（卡片/资料/历史三种渲染）
+│       └── middleware.py      #   wrap_tool_call 钩子：记录工具名、入参、结果
+│
+├── service/                   # 业务层：编排参数与 SQL，不写 SQL 字面量
+│   ├── base_service.py        #   query / write / tx 三个执行原语
+│   ├── message_service.py     #   chat_message：写入、最近窗口、待压批次、关键词回查
+│   ├── summary_service.py     #   chat_summary：最新版本、保存摘要、压缩编排
+│   ├── card_service.py        #   memory_card：upsert（同名强化）、衰减加载
+│   └── rag/                   #   知识库子系统
+│       ├── rag_service.py     #     写编排：ingest / ingest_file / drop / rebuild_vectors
+│       ├── segment_service.py #     切块：五步流水线（结构→切句→比语义→选刀口→收尾）
+│       ├── store_service.py   #     关系层：父段/子块/FTS 读写 + id 生成 + 关键词腿
+│       ├── vector_service.py  #     向量层：Chroma 唯一持有者，含嵌入模型一致性校验
+│       └── retrieve_service.py#     读编排：两腿召回 → RRF → 归并父段 → 预算装填
+│
+├── db/                        # 存储层：只管连接、建表、SQL 语句文本
+│   ├── db.py                  #   connect() + init_db()（5 张普通表 + 1 张 FTS5 虚表的 DDL）
+│   ├── message_db_sql.py      #   chat_message 的 sql_*
+│   ├── summary_db_sql.py      #   chat_summary 的 sql_*
+│   ├── card_db_sql.py         #   memory_card 的 sql_*
+│   ├── rag_db_sql.py          #   rag_parent / rag_chunk / rag_fts 的 sql_*
+│   └── __init__.py            #   门面：service 层 `import db as db_sql` 用这个
+│
 ├── model/
-│   └── factory.py       # 模型工厂 + 注册表（Ollama / DeepSeek 的 chat 与 summary）
-├── session/             # 记忆层（对外只暴露门面 __init__.py）
-│   ├── db.py            # 连接与建表（三层表结构）
-│   ├── db_ops.py        # 所有 SQL
-│   ├── memory_ops.py    # 卡片写入 + 上下文压缩业务编排
-│   ├── current.py       # 用 contextvar 把会话身份隐式传给工具
-│   └── __init__.py      # 包门面，统一导出
-├── prompts/             # 提示词：system.text / group.text / user.text
-├── utils/               # 路径解析、提示词加载
-└── data/app.db          # SQLite 数据（运行时自动创建）
+│   └── factory.py             #   模型工厂 + 注册表（chat / summary / embedding）
+│
+├── prompts/                   # system.text（全局人设）/ group.text / user.text
+├── utils/
+│   ├── current.py             #   contextvar：把会话身份隐式传给工具
+│   ├── scope_util.py          #   group_openid/member_openid → (scope, openid)
+│   ├── time_util.py           #   now() 入库格式 / now_text() 给模型看的格式
+│   ├── prompts_loader.py      #   提示词读取
+│   └── path_tool.py           #   项目根与资源路径
+└── data/
+    ├── app.db                 # SQLite（运行时自动创建）
+    └── chroma/                # Chroma 持久化目录（删了等于向量腿清空）
 ```
+
+**分层规则**（改代码前先读）：
+
+```
+MyClient → agent → service → db
+                     ↑
+                    utils / config / model
+```
+
+- `db/` 只返回 SQL 字符串与建连接，不含业务判断；
+- `service/` 只编排参数与事务，**不出现 SQL 字面量**（一律 `db_sql.sql_*`）；
+- `agent/` 只管一轮请求的流程，不碰 SQL、不碰 chromadb；
+- 权限、作用域这类规则**只写一处**（`_msg_filter`、`sql_fetch_visible_parents`），出现第二份就是未来的不一致。
 
 ## 快速开始
 
-### 1. 创建虚拟环境并安装依赖
+### 1. 虚拟环境与依赖
 
 ```powershell
 python -m venv .venv
@@ -59,63 +105,172 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. 配置密钥（.env）
-
-把 `.env.example` 重命名为 `.env`（去掉 `.example` 后缀），再填入真实值：
+### 2. 配置密钥
+填入三项：
 
 ```
-DEEPSEEK_API_KEY=sk-你的真实密钥
-QQ_BOT_APPID=你的机器人appid
-QQ_BOT_SECRET=你的机器人secret
+# 模型密钥（远程模型时，必填）
+OPEN_CHAT_API_KEY=OPEN_CHAT_API_KEY
+OPEN_EMBEDDING_API_KEY=OPEN_EMBEDDING_API_KEY
+
+# QQ 官方机器人凭据
+QQ_BOT_APPID=QQ_BOT_APPID
+QQ_BOT_SECRET=QQ_BOT_SECRET
 ```
 
-### 3. 运行
+### 3. 准备模型
+
+1️⃣ 本地路线（默认）：启动 Ollama 并拉取模型，名字要与 `config.py` 一致。
+
+```powershell
+ollama pull qwen3:8b
+ollama pull qwen3-embedding:latest
+```
+
+`model/factory.py` 
+```python
+# 模型
+chat_model = OllamaChatFactory().generator()
+summary_model = OllamaSummaryChatFactory().generator()
+embedding_model = OllamaEmbeddingModelFactory().generator()
+```
+
+2️⃣ 远程路线：填充 API KEY，并修改实例，补全`.env`文件\
+`model/factory.py` 
+```python
+# 模型
+chat_model = OpenAIChatFactory().generator()
+summary_model = OpenAISummaryChatFactory().generator()
+embedding_model = OpenAIEmbeddingModelFactory().generator()
+```
+
+### 4. 运行
 
 ```powershell
 python Main.py
 ```
 
-首次运行会自动创建 `data/` 目录；数据库建表通过 `session.init_db()`（DDL 全为 `IF NOT EXISTS`，可重复执行）。
+### 5. 对话
 
-### 4. 使用
-1. 配置好密钥并运行后，在QQ聊天框中找到对应的机器人即可开始对话。
-2. 群聊中，需要让群主开启机器人接收所有聊天消息的权限，才会接收所有消息，否则只会接收 @机器人的消息。
+在 QQ 中找到机器人私聊即可。群聊需群主开启「接收全部消息」权限，否则只收到 @消息。
 
+### 6. 灌入知识库文档
+
+知识库写入目前是**编程接口**，没有命令行入口。准备好 UTF-8 的 txt/markdown，执行：
+
+```powershell
+python -c "import service.rag as r; print(r.ingest_file('docs/手册.md', 'global', 'global'))"
+```
+
+- 第二、三个参数是 `openid` 与 `scope`；填 `global`/`global` 表示**所有会话都能检索到**；
+- 想只对某个私聊用户可见，传该用户的 `user_openid` 与 `config.SCOPE_PRIVATE`；
+- 返回值是子块总数。同一 `source`（默认取文件名）再灌一次就是**整篇重灌**，天然幂等。
+
+门面 `service/rag/__init__.py` 只导出 `ingest` / `ingest_file` / `retrieve`。删整篇与重放向量要直接取模块：
+
+```python
+from service.rag.rag_service import drop, rebuild_vectors
+drop("手册.md")        # 按 source 整篇删除（关系层 + 向量层）
+rebuild_vectors()      # 从 rag_chunk 全量重放向量，修复两库漂移
+```
 
 ## 记忆架构
 
-| 层 | 表 | 作用 |
-|---|---|---|
-| 原始层 | `chat_message` | 全量对话原文；`msg_id` 遵循 `"{role}: {消息标识}"` 格式 |
-| 摘要层 | `chat_summary` | 滚动摘要 + 水位线 `final_msg_id`（版本化，并发有冲突保护） |
-| 事实层 | `memory_card` | 结构化记忆卡片，含 `importance` / `clarity` 打分（1~5） |
+| 层 | 表 | 单位 | 作用 |
+|---|---|---|---|
+| 原始层 | `chat_message` | 一条消息 | 全量对话原文，含 `role` / `created_time` / 自增 `id`（会话内唯一顺序定义）；`msg_id` 遵循 `"{role}: {消息标识}"` 并有唯一索引去重 |
+| 摘要层 | `chat_summary` | 一个版本 | 滚动摘要 + 水位线 `final_msg_id`；`UNIQUE(type, openid, version)`，并发写冲突会被拒绝 |
+| 事实层 | `memory_card` | 一张卡片 | 结构化长期事实，三轴打分 + 半衰期衰减 |
 
-**每轮对话的上下文装配**：最近一条摘要 + 水位线之后 `RECENT_WINDOW` 条原文 + 相关记忆卡片（全局桶 + 当前会话桶）。
+**每轮上下文装配顺序**：场景提示词 → 记忆卡片 → 预检索资料 → 历史摘要 → 水位线后的最近 `RECENT_WINDOW` 条原文 → 本条消息。
 
 ### 上下文压缩
 
-- **触发**：未压缩消息数 > `COMPRESS_KEEP_RECENT` 才启动；否则跳过。
-- **限量**：每次只把最老的 `COMPRESS_BATCH` 条并入摘要，空摘要绝不推进水位线。
-- **安全比例**：`COMPRESS_KEEP_RECENT ≤ RECENT_WINDOW`（避免消息既没压又出窗而不可见）；`COMPRESS_BATCH ≤ COMPRESS_KEEP_RECENT / 2`（防上下文塌缩）。
-- **异步**：压缩通过 `ThreadPoolExecutor` 在后台线程执行，不阻塞回复。
+- **触发**：水位线之后的未压缩消息 > `COMPRESS_KEEP_RECENT` 才启动，否则跳过。
+- **限量**：每次只把**最老的** `COMPRESS_BATCH` 条并入摘要，空摘要绝不推进水位线。
+- **安全比例**：`COMPRESS_KEEP_RECENT ≤ RECENT_WINDOW`（否则消息既没压又出窗，永久不可见）；`COMPRESS_BATCH ≤ COMPRESS_KEEP_RECENT / 2`（防上下文一次塌缩，表现得像失忆）。
+- **异步**：通过 `ThreadPoolExecutor` 后台执行。注意 `Future` 里的异常不会自动打印，失败只表现为「水位线不涨」。
 
-### 全局 / 局部记忆卡片
+### 记忆卡片：三轴正交
 
-- `memory_card` 工具的 `is_global=true` 时，卡片写入 `openid="global"` 的**全局桶**，跨会话可见；
-- 默认 `is_global=false`，写入当前会话真实 openid 的**局部桶**；
-- 读侧 `load_cards` 按 `openid IN ("global", 当前openid)` 过滤，因此两类卡片都能被加载。
-- `openid` / `scope` 等敏感标识由代码注入，模型只能表达"是否全局"，不能填写。
+| 轴 | 管什么 | 取值 |
+|---|---|---|
+| `importance` | 这条信息对回答有多关键 | 5 身份/长期设定 · 3 一般事实 · 1 可忽略 |
+| `clarity` | 这条有多「真」 | 5 用户明确说过 · 3 对话推断 · 1 只是猜测 |
+| `half_life` | 还能有效多久（与 clarity 正交） | 1≈3 天 · 2≈7 天 · 3≈30 天 · 4≈180 天 · 5 不衰减 |
+
+- 读侧按 `0.5^(Δt/半衰期天数)` 衰减，距上次强化超过 `CARD_MAX_HALF_LIVES` 个半衰期即视为遗忘、不再加载。
+- 同名 `title` 再写即更新那张卡，并由系统自动强化（clarity +1、importance/half_life 取更高、刷新有效期），模型不用管合并细节 —— 所以「新建还是更新」完全取决于 title。
+- 作用域：`is_global=true` 写 `openid="global"` 全局桶，跨会话可见；默认写当前会话桶。读侧 `openid IN ("global", 当前openid)`，两类都能加载。
+
+## 知识库：混合检索
+
+### 存储：四个单位
+
+| 表 | 角色 |
+|---|---|
+| `rag_parent` | 「**给**」的单位 —— 父级整段原文，也是权限的唯一真相 |
+| `rag_chunk` | 「**查**」的单位 —— 细子块 + `seq`（原文节内顺序）+ chunk→parent 关系桥 |
+| `rag_fts` | FTS5 虚表，倒排索引，正文独立存一份（换来插入/删除完全显式，无需触发器同步） |
+| Chroma 集合 | 子块向量。每条 metadata 带 `parent_id / openid / type`；集合级 metadata 记录 `embedding_model` 与距离函数，换模型后旧集合会被校验拦下 |
+
+小切大返：检索用细子块（准），返回给模型用父段整段（全）。
+
+**id 约定**（只在 `store_service` 生成）：
+
+```
+parent_id = f"{source}::{节序号:03d}"     # 零填充使「按 id 排序」==「按原文节序」
+chunk_id  = f"{parent_id}::c{子块序号}"
+```
+
+`source` 一个键承担三件事：幂等锚点（同 source 重灌即覆盖）、分组删除单位（`drop_source` 一次清一篇）、连续取节（前缀即身份）。因此 `source` 内**不得**含 `::`、不得以 `:` 结尾 —— 这条校验在 id 生成处，失守的后果是无声多删/多捞。
+
+### 切块：五步流水线，每步只用一种判据
+
+```
+1 结构切   按 Markdown 标题（无标题按空行）切出父段      —— 只看结构
+2 切句     按终止标点划出「可下刀的候选位置」            —— 标点只给候选
+3 比语义   算相邻句相似度（句向量余弦）                  —— 模型提供判据
+4 选刀口   低于本节分位阈值的缝隙才真切开                —— 语义在候选里选
+5 收尾     碎块并回前块；超预算再打包或硬切              —— 长度有终审否决权
+```
+
+语义判断只用在子块层；父段只看结构，保证整段边界稳定可溯源。嵌入模型不可用时自动降级为词面重叠（bigram 词频余弦），并在日志标明 `ENGINE_DOWNGRADED`。
+
+### 检索：一条问句的旅程
+
+```
+问句 ──┬─ 字面腿  FTS5 BM25（trigram 3字滑窗 OR，top RAG_KEYWORD_LIMIT）
+       │                                                        ├─ RRF 并集融合
+       └─ 语义腿  Chroma cosine（top RAG_VECTOR_LIMIT）─────────┘   score = Σ 1/(k+名次)
+                                    ↓
+                        子块归并到父段（同父段只算一条，分取最高）
+                                    ↓
+                        权限裁决（SQL 里：openid IN(...) OR type='global'）
+                                    ↓
+                        按字符预算贪心装填：整段优先，装不下退 ±RAG_WINDOW_SPAN 窗口
+```
+
+四条口径，改动前先读 `retrieve_service.py` 的模块注释：
+
+1. **融合取并集不取交集** —— 任一条腿单独命中就该有分；
+2. **只吃名次不吃分数** —— BM25 的 rank 与 cosine 的 distance 量纲不可比，名次可比；
+3. **权限由 `rag_parent` 裁决** —— Chroma 的 metadata 只是副本，可能旧、可能缺；
+4. **给多少由预算决定，不由条数决定** —— `RAG_TOP_K` 是上限不是目标。
 
 ## 配置项
 
-所有可调参数集中在 [`config.py`](config.py)，每项均带注释说明含义与影响。约定：
+全部旋钮集中在 [`config.py`](config.py)，每项带注释。分组与关键项：
 
-- `config.py` 不 import 任何项目内模块，防止循环依赖；
-- 与数据库 `CHECK` 约束相关的值（如卡片打分上下限）修改时，需同步 `session/db.py` 建表语句；
-- 敏感值一律 `os.getenv`，本文件不得出现明文秘密。
-
-## 安全须知
-
-- 密钥 / Bot secret 只放 `.env` 或环境变量，**严禁写入代码或提交**。
-- 若凭据曾以明文进入过 git 历史，应立即在对应平台**作废旧值并重新生成**。
-- `.gitignore` 已忽略 `.env`、`data/`、`*.db`、`*.log`、`.venv/`、`__pycache__/`、`.idea/`，并显式放行 `.env.example`。
+| 分组 | 关键项 | 说明 |
+|---|---|---|
+| 温度 | `CHAT_TEMPERATURE` / `SUMMARY_TEMPERATURE` | 摘要设 0 保证忠实原文 |
+| 模型名 | `OLLAMA_*` / `OpenAI_*` | 换嵌入模型必须同步换集合名或重建 |
+| 会话标识 | `GLOBAL_OPENID` / `SCOPE_*` / `MSG_ROLE_*` | DDL 的 `CHECK` 约束直接引用它们 |
+| 窗口压缩 | `RECENT_WINDOW` / `COMPRESS_KEEP_RECENT` / `COMPRESS_BATCH` | 三者有大小关系约束，见上节 |
+| 卡片打分 | `CARD_SCORE_MIN/MAX` / `CARD_CLARITY_BUMP` | 改动需同步 `db/db.py` 的 `CHECK` |
+| 卡片衰减 | `CARD_HALFLIFE_DAYS` / `CARD_MAX_HALF_LIVES` | 档位→天数表，`0` 表示不衰减 |
+| 切块 | `RAG_PARENT_MAX_CHARS` / `RAG_CHUNK_SIZE` / `RAG_CHUNK_MIN_CHARS` / `RAG_SEMANTIC_BREAK_RATIO` | 调 `RATIO` 前先用 `segment_service.preview_boundaries()` 看缝隙分布 |
+| 字面腿 | `RAG_FTS_TOKENIZER` / `RAG_KEYWORD_LIMIT` | trigram 要求 SQLite ≥ 3.34，查询短语 ≥ 3 字 |
+| 语义腿 | `RAG_VECTOR_DIR` / `RAG_VECTOR_COLLECTION` / `RAG_VECTOR_LIMIT` | 两腿 limit 对齐，RRF 名次才同量纲 |
+| 融合返回 | `RAG_RRF_K` / `RAG_TOP_K` / `RAG_WINDOW_SPAN` / `RAG_CONTEXT_BUDGET_CHARS` | 预算决定实际条数 |
