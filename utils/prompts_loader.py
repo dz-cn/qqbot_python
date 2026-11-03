@@ -48,8 +48,3 @@ def load_user_prompt():
 group_prompt = load_group_prompt()
 system_prompt = load_system_prompt()
 user_prompt = load_user_prompt()
-
-if __name__ == '__main__':
-    print(group_prompt)
-    print(system_prompt)
-    print(user_prompt)
