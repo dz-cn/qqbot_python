@@ -14,4 +14,8 @@ openai==3.42.0
 # 从 .env 加载环境变量/密钥
 python-dotenv>=1.0.0
 
+# 向量数据库
 chromadb
+
+# 打分模型调用包
+FlagEmbedding

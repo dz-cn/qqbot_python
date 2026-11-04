@@ -1,6 +1,6 @@
 # qqbot_python
 
-基于 **QQ 官方机器人 (botpy) + LangChain 1.0** 的智能陪聊机器人。核心能力是三件事：**分层记忆**（原始 / 摘要 / 事实卡片）、**混合检索知识库**（FTS5 字面腿 + Chroma 语义腿 + RRF 融合）、**模型自主工具调用**（记忆沉淀、知识检索、历史回查、时间获取）。
+基于 **QQ 官方机器人 (botpy) + LangChain 1.0** 的智能陪聊机器人。核心能力是三件事：**分层记忆**（原始 / 摘要 / 事实卡片）、**混合检索知识库**（FTS5 字面腿 + Chroma 语义腿 + RRF 融合 + cross-encoder 精排）、**模型自主工具调用**（记忆沉淀、知识检索、历史回查、时间获取）。
 
 ## 功能特性
 
@@ -9,7 +9,7 @@
 - 🗜️ 上下文滚动压缩：未压缩消息超阈值时，把最老一批并入摘要并推进水位线，后台线程执行不阻塞回复
 - 🃏 记忆卡片由模型自主写入，三轴打分（重要性 / 清晰度 / 半衰期），支持**全局桶 + 会话桶**两种作用域
 - ⏳ 记忆衰减：按半衰期档位对陈旧卡片降权，超过 `CARD_MAX_HALF_LIVES` 个半衰期不再加载
-- 📚 知识库混合检索：五步语义切块（小切大返）→ 字面腿 + 语义腿并集 RRF → 父段归并 → 预算装填
+- 📚 知识库混合检索：五步语义切块（小切大返）→ 字面腿 + 语义腿并集 RRF → 父段归并 → 预算装填 → cross-encoder 精排重排（可选）
 - 🔒 权限在 SQL 里裁决：检索结果的可见性由 `rag_parent.openid/type` 单点决定，不在 Python 里二次筛
 - 🛠️ 四个模型可调用工具：`memory_card` / `knowledge_search` / `search_chat_messages` / `get_current_time`
 - 🎭 场景化提示词：群聊与私聊使用不同角色提示词
@@ -27,6 +27,7 @@
 | 关系存储 | SQLite（WAL 模式 + 外键 + 一次性连接） |
 | 关键词检索 | SQLite **FTS5**，`trigram` 分词（中文免分词库，需 SQLite ≥ 3.34） |
 | 向量检索 | **ChromaDB** 持久化集合（cosine 距离） |
+| 精排模型 | **FlagEmbedding** `FlagReranker`（bge-reranker-v2-m3，cross-encoder，可选） |
 | 配置 | python-dotenv + `config.py` 集中管理 |
 
 
@@ -57,7 +58,8 @@ qqbot_python/
 │       ├── segment_service.py #     切块：五步流水线（结构→切句→比语义→选刀口→收尾）
 │       ├── store_service.py   #     关系层：父段/子块/FTS 读写 + id 生成 + 关键词腿
 │       ├── vector_service.py  #     向量层：Chroma 唯一持有者，含嵌入模型一致性校验
-│       └── retrieve_service.py#     读编排：两腿召回 → RRF → 归并父段 → 预算装填
+│       ├── retrieve_service.py#     读编排：两腿召回 → RRF → 归并父段 → 预算装填 → 交给精排
+│       └── rerank_service.py  #     精排：cross-encoder 逐对打分重排（FlagReranker 唯一持有者）
 │
 ├── db/                        # 存储层：只管连接、建表、SQL 语句文本
 │   ├── db.py                  #   connect() + init_db()（5 张普通表 + 1 张 FTS5 虚表的 DDL）
@@ -106,7 +108,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. 配置密钥
-填入三项：
+填入以下密钥：
 
 ```
 # 模型密钥（远程模型时，必填）
@@ -173,6 +175,28 @@ from service.rag.rag_service import drop, rebuild_vectors
 drop("手册.md")        # 按 source 整篇删除（关系层 + 向量层）
 rebuild_vectors()      # 从 rag_chunk 全量重放向量，修复两库漂移
 ```
+
+### 7. 启用精排（可选）
+
+召回并装填预算之后，可再接一层 **cross-encoder 精排**：把问句与每个候选父段逐对送进模型重新打分，按相关度排序后返回。默认关闭，检索只用 RRF 融合名次。
+
+1️⃣ 下载精排模型 **bge-reranker-v2-m3** 的权重文件到同一个本地目录（国内可用镜像站）：
+
+https://hf-mirror.com/BAAI/bge-reranker-v2-m3/tree/main
+
+2️⃣ 在 `.env` 里填写模型目录路径：
+
+```
+RERANKER_MODEL_DIR=/filepath
+```
+
+3️⃣ 在 `config.py` 里打开总开关：
+
+```python
+RAG_USE_RERANK = True
+```
+
+模型在首次检索时加载、之后常驻内存。`RERANKER_MODEL_DIR` 留空或 `RAG_USE_RERANK = False` 时，精排整层跳过，检索直接用融合名次返回。
 
 ## 记忆架构
 
@@ -249,6 +273,8 @@ chunk_id  = f"{parent_id}::c{子块序号}"
                         权限裁决（SQL 里：openid IN(...) OR type='global'）
                                     ↓
                         按字符预算贪心装填：整段优先，装不下退 ±RAG_WINDOW_SPAN 窗口
+                                    ↓
+                  cross-encoder 精排（RAG_USE_RERANK，可选）：逐对重新打分并按相关度排序
 ```
 
 四条口径，改动前先读 `retrieve_service.py` 的模块注释：
@@ -257,6 +283,15 @@ chunk_id  = f"{parent_id}::c{子块序号}"
 2. **只吃名次不吃分数** —— BM25 的 rank 与 cosine 的 distance 量纲不可比，名次可比；
 3. **权限由 `rag_parent` 裁决** —— Chroma 的 metadata 只是副本，可能旧、可能缺；
 4. **给多少由预算决定，不由条数决定** —— `RAG_TOP_K` 是上限不是目标。
+
+### 精排：可选的 cross-encoder 重排
+
+召回、归并、装填得到的父段是按 RRF 名次排的，名次只反映「两条腿各把它排在哪」，不含绝对相关度。开启 `RAG_USE_RERANK` 后，`rerank_service` 把问句与每个候选父段拼成 (问句, 段) 对，用 bge-reranker-v2-m3 逐对打分（sigmoid 归一到 0~1），按分数重排返回。
+
+- **全部候选都判**，不只判前 N 条：进来的已被 `RAG_TOP_K` 与字符预算夹过一道，量级很小。
+- 打分文本按 `RERANK_MAX_CHARS` 截断，只截「送进模型的文本」，交回调用方的仍是整段正文。
+- 模型延迟加载（首次检索才 import FlagEmbedding、才把权重读进内存），并由锁保证只加载一次。
+- 可选地按 `RERANK_MIN_SCORE` 绝对阈值丢弃不相关段（默认 `None` 不启用）；开关关闭或模型目录留空时整层跳过，原样返回融合名次结果。
 
 ## 配置项
 
@@ -274,3 +309,4 @@ chunk_id  = f"{parent_id}::c{子块序号}"
 | 字面腿 | `RAG_FTS_TOKENIZER` / `RAG_KEYWORD_LIMIT` | trigram 要求 SQLite ≥ 3.34，查询短语 ≥ 3 字 |
 | 语义腿 | `RAG_VECTOR_DIR` / `RAG_VECTOR_COLLECTION` / `RAG_VECTOR_LIMIT` | 两腿 limit 对齐，RRF 名次才同量纲 |
 | 融合返回 | `RAG_RRF_K` / `RAG_TOP_K` / `RAG_WINDOW_SPAN` / `RAG_CONTEXT_BUDGET_CHARS` | 预算决定实际条数 |
+| 精排 | `RAG_USE_RERANK` / `RERANKER_MODEL_DIR` / `RERANK_MAX_CHARS` / `RERANK_MIN_SCORE` / `RERANK_USE_FP16` | cross-encoder 重排，默认关闭；权重目录走 `.env`，留空即跳过 |

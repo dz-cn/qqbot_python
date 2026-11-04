@@ -77,6 +77,7 @@ def split_children(section: str, embedder=None) -> list[str]:
         return [section]
 
     scores, _engine = _get_sentences_similarity(sentences, embedder)
+    logger.info(f"[rag.segment] 本次使用 {_engine} 计算相似度")
     groups = _group_by_weak_bonds(scores)
     groups = _absorb_undersized_groups(sentences, groups)
     blocks = _join_groups(groups, sentences)
