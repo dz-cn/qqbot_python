@@ -8,11 +8,11 @@
   4) 给多少由预算决定，不由条数决定 —— top_k 是上限，不是目标。
 """
 from typing import NamedTuple
-
-import config
 from botpy import logger
 from service.rag import store_service as store
 from service.rag import vector_service as vec
+from service.rag.rerank_service import rerank
+import config
 
 OVERFETCH = 2                              # 截断前多取几倍候选，留给权限落空与窗口省下的余量
 ELLIPSIS = "…"                             # 节选标记：不标出来，模型会把窗口当成完整规则复述
@@ -61,7 +61,9 @@ def retrieve(question: str, open_ids: list[str],
     logger.info(f"[rag.retrieve] 字面={len(literal)} 语义={len(semantic)} 融合={len(fused)} "
                 f"父段={len(merged)} 可见={len(texts)} 返回={len(passages)} "
                 f"占用={sum(len(p.text) for p in passages)}/{budget} question={question!r}")
-    return passages
+
+    # 重排后返回
+    return rerank(question, passages)
 
 
 def _fuse(*legs: list[tuple[str, float]]) -> dict[str, float]:

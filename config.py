@@ -86,3 +86,9 @@ RAG_WINDOW_SPAN = 2                # 窗口降级初值：命中块 ±2 个子�
 RAG_CONTEXT_BUDGET_CHARS = 2600    # 检索内容总字符预算 ≈ 2 个整段 + 余量；条数由它决定，top_k 只是上限
 RAG_MESSAGE_PROXY = "msg-"         # source 来源前缀-消息作为存储内容
 RAG_KNOWLEDGE_PROXY = "knowledge-" # source 来源前缀-知识作为存储内容
+# ---------------------------------------------------------------- RAG 精排（cross-encoder）
+RERANKER_MODEL_DIR = os.getenv("RERANKER_MODEL_DIR", "")   # 模型权重目录：机器相关且体积大，走 .env 且不进 git；空=精排自动跳过
+RAG_USE_RERANK = False              # 精排总开关：False=retrieve 不调模型；CPU 上这是秒级开销，先实测耗时再打开
+RERANK_MAX_CHARS = 512              # 打分文本截断长度；父段可达 1200 字，注意力开销随长度平方增长（不影响交给 LLM 的正文）
+RERANK_MIN_SCORE = None             # 绝对相关阈值（sigmoid 后 0~1）：低于它的当不相关丢弃；None=不启用，必须先测真文档分布再定
+RERANK_USE_FP16 = False             # fp16 只在 CUDA 生效；CPU 开它无收益（config.json 声明 torch_dtype=float32）

@@ -49,12 +49,13 @@ def drop(source: str) -> int:
     vec.delete_vectors(removed)
     return len(removed)
 
-
 def rebuild_vectors() -> int:
     """从 rag_chunk 全量重放向量 —— 两库漂移的唯一修复手段。
-    用于：灌向量中途失败、误删集合、以及换嵌入模型（换模型要先 vec.drop_collection()，
-    否则 vector_service 的模型校验会拦下这次重放，那是它在正常工作）。
+    内部先 vec.drop_collection() 再逐段重放：既补齐缺失向量，也清掉关系层已删的孤儿向量，
+    因此换嵌入模型直接调本函数即可（旧集合被作废，新集合以当前模型名重建，校验必过）。
+    代价：drop 到重放完成之间向量腿不可用，检索会静默降级为只有字面腿，尽量在低峰执行。
     按父段逐段调用 save_vectors：每次 embed 只处理一节的几块，不会把全库正文压进一个请求。"""
+    vec.drop_collection()
     sections = store.all_sections()
     total = 0
     for parent_id, item in sections.items():
