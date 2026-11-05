@@ -1,5 +1,5 @@
 from utils.path_tool import get_abs_path
-from botpy import logger
+from utils.log_util import logger
 import config
 
 

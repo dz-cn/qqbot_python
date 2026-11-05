@@ -1,5 +1,5 @@
 from service.base_service import write, query
-from botpy import logger
+from utils.log_util import logger
 import config
 import utils
 import db as db_sql

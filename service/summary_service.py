@@ -1,7 +1,7 @@
 """chat_summary 的业务层：编排参数、组装 SQL（取自 db.summary_db_sql）、执行读写。
 SQL 语句本身不写在这里，只调用 db_sql.sql_* 拿到语句，再交给 BaseOps 的 query/write。"""
 from service.base_service import write, query
-from botpy import logger
+from utils.log_util import logger
 from model.factory import summary_model
 from service.message_service import pending_compress
 import db as db_sql

@@ -14,7 +14,7 @@
 三、语义判断只用在「子块」这一层；父段只看结构，不看向量，保证整段边界稳定可溯源。
 """
 from collections import Counter
-from botpy import logger
+from utils.log_util import logger
 import math
 import re
 import config

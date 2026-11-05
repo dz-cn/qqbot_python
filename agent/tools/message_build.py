@@ -4,6 +4,7 @@
 """
 import config
 from service.rag.retrieve_service import Passage
+from utils.speaker_util import label_message
 
 
 def _scope_label(card_type: str) -> str:
@@ -42,9 +43,16 @@ def blocks(passages: list[Passage]) -> str:
 
 def build_messages(memory_cards: list[dict], messages: list[dict],
                    history: dict, content: str, scenario_prompt: str,
-                   passages: list[Passage]) -> list[dict]:
+                   passages: list[Passage], *,
+                   group_openid: str | None = None,
+                   current_openid: str | None = None) -> list[dict]:
         """装配进模型的上下文。passages 故意是必填：
-        可选参数会让「忘了传」变成静默降级 —— 检索照常执行、日志照常打，只是资料没进 prompt。"""
+        可选参数会让「忘了传」变成静默降级 —— 检索照常执行、日志照常打，只是资料没进 prompt。
+
+        群聊里 role=user 的每条可能来自不同人，因此带上 `[群友xxxx]` 稳定别名：
+        同一个人始终同一别名（openid 短哈希），模型才能分清「谁之前说过什么」。
+        私聊只有一个对话者，role 足够，不加前缀以免干扰语气。
+        """
         input_dict = []
 
         if scenario_prompt:
@@ -60,8 +68,13 @@ def build_messages(memory_cards: list[dict], messages: list[dict],
             input_dict.append({"role": "system", "content": f"历史内容回顾：{history["summary"]}"})
 
         for m in messages:
-            input_dict.append({"role": m["role"], "content": m["content"]})
+            body = m["content"]
+            if group_openid and m["role"] == config.MSG_ROLE_USER:
+                body = label_message(body, m.get("user_openid"))
+            input_dict.append({"role": m["role"], "content": body})
 
-        input_dict.append({"role": "user", "content": content})
+        # 本条消息也标上别名：模型据此知道"现在说话的是谁"，才能把历史和当下对上
+        current = label_message(content, current_openid) if group_openid else content
+        input_dict.append({"role": "user", "content": current})
 
         return input_dict
