@@ -3,7 +3,7 @@ from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
-from botpy import logger
+from utils.log_util import logger
 
 
 @wrap_tool_call

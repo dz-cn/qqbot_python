@@ -1,6 +1,6 @@
 from langchain.agents import create_agent
 from agent.tools.agent_tools import agent_tools
-from botpy import logger
+from utils.log_util import logger
 from agent.tools.middleware import agent_middleware
 from model.factory import chat_model
 from agent.tools.message_build import build_messages
@@ -52,8 +52,9 @@ class ReactAgent:
         logger.info(f"[chat] 上下文装配完成 summary_version={history['version'] if history else 0} "
                     f"水位线={final_msg_id} 原文={len(messages)}条 卡片={len(memory_cards)}条")
 
-        # 拼接输入内容
-        input_dict = build_messages(memory_cards, messages, history, content, scenario_prompt, passage)
+        # 拼接输入内容（群聊带上发言人别名，模型才能分清谁在说话）
+        input_dict = build_messages(memory_cards, messages, history, content, scenario_prompt, passage,
+                                    group_openid=group_openid, current_openid=member_openid)
 
         # 这里展示完整的输入内容
         logger.info(f"[chat] 输入内容构建完成 input_len={len(input_dict)} input={input_dict}")

@@ -1,5 +1,5 @@
-# QQ 官方机器人凭据
-qq-botpy==1.2.1
+# QQ 通道层（qq/）：WebSocket 长连接 + OpenAPI 发送（不依赖任何机器人 SDK）
+aiohttp>=3.9,<4
 
 # LangChain 1.0 智能体栈（recat_agent 使用 create_agent，底层依赖 langgraph）
 langchain==1.4.7

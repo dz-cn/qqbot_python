@@ -1,36 +1,26 @@
-import botpy
-import config
-from MyClient import MyClient
-from db.db import init_db
-from service.rag.retrieve_service import retrieve
-from service.rag.rag_service import ingest, ingest_file
+import asyncio
+from utils.log_util import logger
 
 
-def insertRag(text: str):
-    """
-    将文本存储到向量数据库和索引数据库
-    :param text: 要存储的文本
-    """
-    # QQ 机器人聊天使用下：source：消息 id | openid：用户id/群聊id | scope：区分是群聊/私聊
-    return ingest(text, "source", "openid", "scope")
+async def _run_native() -> None:
+    """通道入口：WebSocket 收消息 + OpenAPI 发消息。"""
+    # 延迟 import：只有真正启动机器人才加载 langchain/chromadb 这一大坨
+    from agent.recat_agent import agent
+    import qq
 
-def insertRagFile(file: str):
-    """
-    将文件存储到向量数据库和索引数据库
-    :param file: 要存储的文件
-    """
-    return ingest_file(file, "openid", "scope", "source")
+    logger.info("[main] 启动通道：WebSocket 收 + OpenAPI 发")
+    await qq.run_bot(agent.chat)
 
-def queryRag(question: str):
-    """
-    从混合检索
-    :param question: 要查询的问题
-    """
-    return retrieve(question, ["openid"])
+
+def main() -> None:
+    from db.db import init_db
+
+    init_db()
+    try:
+        asyncio.run(_run_native())
+    except KeyboardInterrupt:
+        logger.info("[main] 收到退出信号，已停止")
 
 
 if __name__ == "__main__":
-    init_db()
-    intents = botpy.Intents(public_messages=True, direct_message=True)
-    client = MyClient(intents=intents)
-    client.run(appid=config.QQ_BOT_APPID, secret=config.QQ_BOT_SECRET)
+    main()

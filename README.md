@@ -1,10 +1,11 @@
 # qqbot_python
 
-基于 **QQ 官方机器人 (botpy) + LangChain 1.0** 的智能陪聊机器人。核心能力是三件事：**分层记忆**（原始 / 摘要 / 事实卡片）、**混合检索知识库**（FTS5 字面腿 + Chroma 语义腿 + RRF 融合 + cross-encoder 精排）、**模型自主工具调用**（记忆沉淀、知识检索、历史回查、时间获取）。
+基于 **QQ 官方机器人（原生 WebSocket 收消息 + OpenAPI 发消息）+ LangChain 1.0** 的智能陪聊机器人。核心能力是三件事：**分层记忆**（原始 / 摘要 / 事实卡片）、**混合检索知识库**（FTS5 字面腿 + Chroma 语义腿 + RRF 融合 + cross-encoder 精排）、**模型自主工具调用**（记忆沉淀、知识检索、历史回查、时间获取）。
 
 ## 功能特性
 
 - 🤖 接入 QQ 开放平台，支持私聊 (C2C)、群聊全量消息与 @机器人消息
+- 🛰️ 通道层与业务解耦：`qq/` 负责收（WebSocket）发（HTTPS），`agent` / `service` / `db` 不感知平台协议；心跳独立于模型推理，长回复不会把连接拖断
 - 🧠 三层记忆：原始消息层 / 滚动摘要层 / 事实卡片层
 - 🗜️ 上下文滚动压缩：未压缩消息超阈值时，把最老一批并入摘要并推进水位线，后台线程执行不阻塞回复
 - 🃏 记忆卡片由模型自主写入，三轴打分（重要性 / 清晰度 / 半衰期），支持**全局桶 + 会话桶**两种作用域
@@ -20,7 +21,7 @@
 | 用途 | 选型 |
 |---|---|
 | 语言 | Python 3.13 |
-| QQ 机器人 | [qq-botpy](https://pypi.org/project/qq-botpy/) 1.2.1（导入名 `botpy`，安装名 `qq-botpy`） |
+| QQ 机器人 | 原生通道：`aiohttp` WebSocket 收事件 + OpenAPI（`https://api.bot.qq.com`）发消息（不再依赖 `qq-botpy`） |
 | 智能体 | LangChain 1.x `create_agent` + LangGraph 1.x（工具调用、中间件钩子） |
 | 对话 / 摘要模型 | 本地 Ollama（`ChatOllama`，默认 `qwen3:8b`），或 DeepSeek 等 OpenAI 兼容服务（`ChatOpenAI`） |
 | 嵌入模型 | Ollama `OllamaEmbeddings`（默认 `qwen3-embedding:latest`） |
@@ -35,11 +36,20 @@
 
 ```
 qqbot_python/
-├── Main.py                    # 入口：建表 → 注册 intents → 启动 botpy 客户端
-├── MyClient.py                # 事件处理：群聊/私聊消息 → agent.chat() → 回复
+├── Main.py                    # 入口：建表 → 启动 qq/ 通道（WebSocket 收 + OpenAPI 发）
 ├── config.py                  # 全部可调参数，每项带一行「含义 + 影响」注释
 ├── requirements.txt           # 依赖清单
 ├── .env.example               # 环境变量模板（复制为 .env 后填真实值）
+│
+├── qq/                        # 通道层：WebSocket 收消息 + OpenAPI 发消息（不依赖任何机器人 SDK）
+│   ├── __init__.py            #   门面：run_bot(handler) 装配 token/api/dispatcher/gateway
+│   ├── token.py               #   access_token：缓存、提前 60s 续期、并发单飞
+│   ├── gateway.py             #   WSS：Hello / Identify / 心跳 / Resume / 关闭码处置
+│   ├── events.py              #   事件 → IncomingMessage（字段归一 + <@xxx> 占位符清洗）
+│   ├── dispatcher.py          #   去重、队列、会话串行、线程池执行、回复发送
+│   ├── api.py                 #   POST /v2/{users|groups}/{openid}/messages（重试 + 分条）
+│   ├── mention.py             #   @ 提及：占位符 → <qqbot-at-user>，并收敛模型自创标签
+│   └── errors.py              #   错误码 → 该不该重试
 │
 ├── agent/                     # 编排层：一次请求从头到尾怎么走
 │   ├── recat_agent.py         #   装配上下文 → 预检索 → 调模型 → 存消息 → 后台压缩
@@ -78,7 +88,10 @@ qqbot_python/
 │   ├── scope_util.py          #   group_openid/member_openid → (scope, openid)
 │   ├── time_util.py           #   now() 入库格式 / now_text() 给模型看的格式
 │   ├── prompts_loader.py      #   提示词读取
+│   ├── speaker_util.py        #   群聊发言人别名：openid → 群友xxxx（短哈希）
+│   ├── log_util.py            #   通道层日志（控制台 + logs/bot.log 按天轮转）
 │   └── path_tool.py           #   项目根与资源路径
+│
 └── data/
     ├── app.db                 # SQLite（运行时自动创建）
     └── chroma/                # Chroma 持久化目录（删了等于向量腿清空）
@@ -87,14 +100,18 @@ qqbot_python/
 **分层规则**（改代码前先读）：
 
 ```
-MyClient → agent → service → db
-                     ↑
-                    utils / config / model
+Main ──► qq（gateway → events → dispatcher → api）
+          │
+          ▼
+        agent → service → db
+                   ↑
+                  utils / config / model
 ```
 
 - `db/` 只返回 SQL 字符串与建连接，不含业务判断；
 - `service/` 只编排参数与事务，**不出现 SQL 字面量**（一律 `db_sql.sql_*`）；
 - `agent/` 只管一轮请求的流程，不碰 SQL、不碰 chromadb；
+- `qq/` 只管协议与传输：不碰 SQL、不碰 chromadb、不 import `agent`（handler 由 `Main.py` 注入）；
 - 权限、作用域这类规则**只写一处**（`_msg_filter`、`sql_fetch_visible_parents`），出现第二份就是未来的不一致。
 
 ## 快速开始
@@ -152,6 +169,12 @@ embedding_model = OpenAIEmbeddingModelFactory().generator()
 python Main.py
 ```
 
+默认（也是唯一）走原生通道：WebSocket 收 + OpenAPI 发，不依赖任何机器人 SDK。
+
+- 启动日志写在控制台与 `logs/bot.log`（按天轮转，保留 14 天；`logs/` 已在 `.gitignore`）；
+- 首次启动会先取 `access_token`，再取网关地址并 Identify；`intents` 只订阅 `GROUP_AND_C2C_EVENT`（群聊 + 单聊）；
+- 若日志出现 `4013/4014`，说明机器人没有群聊/C2C 事件权限，需要到开放平台确认。
+
 ### 5. 对话
 
 在 QQ 中找到机器人私聊即可。群聊需群主开启「接收全部消息」权限，否则只收到 @消息。
@@ -198,6 +221,49 @@ RAG_USE_RERANK = True
 
 模型在首次检索时加载、之后常驻内存。`RERANKER_MODEL_DIR` 留空或 `RAG_USE_RERANK = False` 时，精排整层跳过，检索直接用融合名次返回。
 
+## 通道层：WebSocket 收 + OpenAPI 发
+
+`qq/` 是唯一与 QQ 平台通信的模块，收和发走两条互不依赖的链路：
+
+```
+收：GET /gateway → WSS → Hello → Identify/Resume → 心跳 → 事件 → IncomingMessage
+发：POST /v2/users/{user_openid}/messages      ← 单聊
+    POST /v2/groups/{group_openid}/messages    ← 群聊
+```
+
+### 收：事件怎么进来
+
+- 只订阅 `1 << 25`（`GROUP_AND_C2C_EVENT`），白名单事件：`C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`；
+- `events.py` 把 `author.user_openid` 与 `author.member_openid` 归一成一个 `member_openid`，正好对上 `agent.chat` 的形参；
+- 群全量模式下的 `<@member_openid>` / `<@all>` 会替换成 `@昵称` / `@全体成员`；卡片/聊天记录/引用消息给兜底文案；
+- 心跳与收帧是两个独立 task，`agent.chat` 在线程池里跑，模型再慢也不会让心跳停摆；
+- 断线按关闭码处置：`4004` 强制刷新 token 后 Identify、`4006/4007/4900~4913` 清 session 后 Identify、`4008/4009` 稍后 Resume、`4010~4014` 与 `4914/4915` 直接退出（配置/账号问题，重连无意义）。
+
+### 发：消息怎么出去
+
+- 一律带 `msg_id` 做**被动回复**（`QQ_ALLOW_ACTIVE_MSG=False` 时禁止主动消息）；
+- 同一 `msg_id` + `msg_seq` 重复发送会被平台判重（`40054005`），代码把它当**幂等成功**处理；
+- 被动窗口按保守值 5 分钟（`QQ_PASSIVE_TTL_SECONDS`），超时不再发，避免必然失败的请求；
+- 错误码分五类：幂等成功 / 放弃（过期、越权、内容违规、超长）/ 退避重试（频控、5xx、网络）/ 刷新 token 重试一次 / 不重试；
+- 超长回复按段落切成最多 `QQ_MAX_PARTS` 条，`msg_seq` 依次递增；
+- **@ 当前发言人**：模型输出 `[[AT_ME]]`，通道层换成 `<qqbot-at-user id="member_openid" />` 并以 **markdown** 发送（官方规定群聊 @用户 只支持 markdown）；单聊没有 @ 能力，标签会被剥掉只留正文。
+
+### 去重与并发
+
+| 机制 | 位置 | 说明 |
+|---|---|---|
+| 去重 | `dispatcher._seen` | 平台会重复推送同一 `msg_id`；命中即丢弃、不进模型（DB 的唯一索引仍是兜底） |
+| 队列 | `asyncio.Queue`（`QQ_QUEUE_MAX`） | 满了丢弃并告警：宁可丢消息，也不能拖垮心跳 |
+| 会话串行 | 按 openid 的 `asyncio.Lock` | `agent.chat` 内部有读改写序列，同会话并发会打乱消息顺序与摘要水位线 |
+| 并发 | `asyncio.to_thread` + `QQ_WORKERS` | 同步推理进线程池，事件循环留给心跳与收帧 |
+
+### 需要知道的边界
+
+- **单实例单连接**：同一机器人不要起多个进程都连 `shard=[0,1]`，否则会互抢事件；要扩容必须用 `/gateway/bot` 的分片。
+- **@ 人只在群聊可用**：官方「文本交互」规定 @用户 只能写成 `<qqbot-at-user id="member_openid" />`，且**群聊仅 markdown 支持**；**单聊（C2C）没有 @ 用户能力**。模型若自创 `<at ...>`、`<@...>` 这类非协议标签，会被剥掉而不是原样发出。
+- **单聊被动窗口**官方两处口径不一致（接口页首 60 分钟 / `msg_id` 字段说明 5 分钟），实现取保守的 5 分钟，可用配置项改。
+- **不再有 botpy 回退**：`MyClient.py` 与 `qq-botpy` 依赖已删除，全项目只走 `qq/` 通道；需要回退旧实现时用 git 回滚到对应提交。
+
 ## 记忆架构
 
 | 层 | 表 | 单位 | 作用 |
@@ -206,7 +272,7 @@ RAG_USE_RERANK = True
 | 摘要层 | `chat_summary` | 一个版本 | 滚动摘要 + 水位线 `final_msg_id`；`UNIQUE(type, openid, version)`，并发写冲突会被拒绝 |
 | 事实层 | `memory_card` | 一张卡片 | 结构化长期事实，三轴打分 + 半衰期衰减 |
 
-**每轮上下文装配顺序**：场景提示词 → 记忆卡片 → 预检索资料 → 历史摘要 → 水位线后的最近 `RECENT_WINDOW` 条原文 → 本条消息。
+**每轮上下文装配顺序**：场景提示词 → 记忆卡片 → 预检索资料 → 历史摘要 → 水位线后的最近 `RECENT_WINDOW` 条原文 → 本条消息。群聊里每条 `role=user` 的原文都会带 `[群友xxxx]` 稳定别名（`utils/speaker_util.py`，openid 短哈希），模型据此区分发言人；私聊只有一个对话者，不加前缀。
 
 ### 上下文压缩
 
@@ -310,3 +376,4 @@ chunk_id  = f"{parent_id}::c{子块序号}"
 | 语义腿 | `RAG_VECTOR_DIR` / `RAG_VECTOR_COLLECTION` / `RAG_VECTOR_LIMIT` | 两腿 limit 对齐，RRF 名次才同量纲 |
 | 融合返回 | `RAG_RRF_K` / `RAG_TOP_K` / `RAG_WINDOW_SPAN` / `RAG_CONTEXT_BUDGET_CHARS` | 预算决定实际条数 |
 | 精排 | `RAG_USE_RERANK` / `RERANKER_MODEL_DIR` / `RERANK_MAX_CHARS` / `RERANK_MIN_SCORE` / `RERANK_USE_FP16` | cross-encoder 重排，默认关闭；权重目录走 `.env`，留空即跳过 |
+| 通道层 | `QQ_INTENTS` / `QQ_WORKERS` / `QQ_QUEUE_MAX` / `QQ_PASSIVE_TTL_SECONDS` / `QQ_MAX_CONTENT_CHARS` | intents 只订 `1<<25`；并发/窗口/队列按行内注释调 |

@@ -8,7 +8,7 @@
   4) 给多少由预算决定，不由条数决定 —— top_k 是上限，不是目标。
 """
 from typing import NamedTuple
-from botpy import logger
+from utils.log_util import logger
 from service.rag import store_service as store
 from service.rag import vector_service as vec
 from service.rag.rerank_service import rerank

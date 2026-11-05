@@ -8,7 +8,7 @@
 """
 from pathlib import Path
 
-from botpy import logger
+from utils.log_util import logger
 from service.rag import store_service as store
 from service.rag import vector_service as vec
 from service.rag.segment_service import segment

@@ -11,7 +11,7 @@ from typing import NamedTuple
 
 import config
 import db as db_sql
-from botpy import logger
+from utils.log_util import logger
 from service.base_service import tx
 from service.base_service import query
 

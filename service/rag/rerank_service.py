@@ -2,7 +2,7 @@
 本模块是 FlagReranker 的唯一持有者（与 vector_service 唯一持有 chromadb 对称）；不写 SQL、不做召回、不管预算。
 """
 from typing import TYPE_CHECKING
-from botpy import logger
+from utils.log_util import logger
 import threading
 import time
 import config

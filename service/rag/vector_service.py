@@ -7,7 +7,7 @@
   3) 不裁决权限：metadata 里的 openid/type 只为加速过滤，回来的结果必须由 retrieve 回 rag_parent 复核。
 """
 import config
-from botpy import logger
+from utils.log_util import logger
 
 META_SPACE = "hnsw:space"                    # chroma 的相似度函数键（旧写法，0.4~1.x 通用）
 META_MODEL = "embedding_model"               # 自建 metadata：记录这套向量是哪个模型产的

@@ -1,5 +1,5 @@
 from langchain_core.tools import tool
-from botpy import logger
+from utils.log_util import logger
 import config
 import utils
 import service
